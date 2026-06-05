@@ -1,0 +1,70 @@
+services:
+  - type: web
+    name: kinra-backend
+    runtime: node
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: AUTH_DATA_PATH
+        value: /var/data/kinra-auth.json
+      - key: SESSION_TTL_HOURS
+        value: "2160"
+      - key: APPLE_BUNDLE_ID
+        value: com.jeffreyyang.saku
+      - key: APPLE_SERVICE_ID
+        sync: false
+      - key: PSA_AUTH_MODE
+        value: password
+      - key: PSA_TOKEN_URL
+        sync: false
+      - key: PSA_CLIENT_ID
+        sync: false
+      - key: PSA_CLIENT_SECRET
+        sync: false
+      - key: PSA_USERNAME
+        sync: false
+      - key: PSA_PASSWORD
+        sync: false
+      - key: PSA_SCOPE
+        sync: false
+      - key: PSA_ACCESS_TOKEN
+        sync: false
+      - key: PSA_API_BASE_URL
+        value: https://api.psacard.com
+      - key: PSA_CERT_PATH_TEMPLATE
+        value: /publicapi/cert/GetByCertNumber/{certNumber}
+      - key: PSA_CERT_IMAGES_PATH_TEMPLATE
+        value: /publicapi/cert/GetImagesByCertNumber/{certNumber}
+      - key: EBAY_CLIENT_ID
+        sync: false
+      - key: EBAY_CLIENT_SECRET
+        sync: false
+      - key: EBAY_MARKETPLACE_ID
+        value: EBAY_US
+      - key: EBAY_ENABLE_MARKETPLACE_INSIGHTS
+        value: "false"
+      - key: TCGPLAYER_PUBLIC_KEY
+        sync: false
+      - key: TCGPLAYER_PRIVATE_KEY
+        sync: false
+      - key: TCGPLAYER_ACCESS_TOKEN
+        sync: false
+      - key: GRADED_CENSUS_RAPIDAPI_KEY
+        sync: false
+      - key: GRADED_CENSUS_RAPIDAPI_HOST
+        value: graded-card-census-api.p.rapidapi.com
+      - key: GRADED_CENSUS_API_BASE_URL
+        value: https://graded-card-census-api.p.rapidapi.com
+      - key: POKEMON_TCG_API_BASE_URL
+        value: https://api.pokemontcg.io/v2
+      - key: INCLUDE_RAW_PSA_RESPONSE
+        value: "false"
+    disk:
+      name: kinra-data
+      mountPath: /var/data
+      sizeGB: 1
