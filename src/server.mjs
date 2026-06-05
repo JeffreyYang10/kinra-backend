@@ -2193,7 +2193,7 @@ function firstNumber(record, keys) {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const server = http.createServer(handleKinraRequest);
-  server.listen(config.port, "127.0.0.1", () => {
-    console.log(`Kinra backend listening on http://127.0.0.1:${config.port}`);
+  server.listen(config.port, "0.0.0.0", () => {
+    console.log(`Kinra backend listening on port ${config.port}`);
   });
 }
