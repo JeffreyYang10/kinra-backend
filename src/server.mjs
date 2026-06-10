@@ -22,6 +22,11 @@ const config = {
   sessionTTLHours: Number(process.env.SESSION_TTL_HOURS || 24 * 90),
   appleBundleID: process.env.APPLE_BUNDLE_ID || "com.jeffreyyang.saku",
   appleServiceID: process.env.APPLE_SERVICE_ID || "",
+  googleClientIDs: [
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_IOS_CLIENT_ID,
+    process.env.GOOGLE_WEB_CLIENT_ID
+  ].filter(Boolean),
   psaAuthMode: process.env.PSA_AUTH_MODE || "password",
   psaTokenURL: process.env.PSA_TOKEN_URL || "",
   psaClientID: process.env.PSA_CLIENT_ID || "",
@@ -81,6 +86,10 @@ let appleJWKCache = {
   keys: [],
   expiresAt: 0
 };
+let googleJWKCache = {
+  keys: [],
+  expiresAt: 0
+};
 
 export async function handleKinraRequest(request, response) {
   try {
@@ -103,6 +112,7 @@ export async function handleKinraRequest(request, response) {
         marketConfigured: isMarketConfigured(),
         providers: {
           auth: true,
+          google: isGoogleConfigured(),
           psa: isPSAConfigured(),
           ebayBrowse: isEbayConfigured(),
           ebayMarketplaceInsights: isEbayInsightsConfigured(),
@@ -331,17 +341,28 @@ class KinraAuthStore {
   async federatedSignIn(payload = {}) {
     await this.load();
     const provider = cleanText(payload.provider).toLowerCase();
-    if (provider !== "apple") {
-      sendAuthError("Google sign-in is not configured yet.", 501, "provider_not_configured");
+    let claims;
+    if (provider === "apple") {
+      claims = await verifyAppleIdentityToken(payload.idToken);
+    } else if (provider === "google") {
+      claims = await verifyGoogleIdentityToken(payload.idToken);
+    } else {
+      sendAuthError("That sign-in provider is not supported.", 501, "provider_not_configured");
     }
 
-    const claims = await verifyAppleIdentityToken(payload.idToken);
-    const providerKey = `apple:${claims.sub}`;
-    const email = normalizedEmail(payload.email || claims.email || `${claims.sub}@privaterelay.appleid.com`);
+    const providerKey = `${provider}:${claims.sub}`;
+    const email = normalizedEmail(
+      payload.email
+        || claims.email
+        || (provider === "apple" ? `${claims.sub}@privaterelay.appleid.com` : "")
+    );
+    if (!email) {
+      sendAuthError("That sign-in provider did not return an email.", 401, "missing_provider_email");
+    }
     const fallbackName = email.split("@")[0] || "Kinra Collector";
-    const name = cleanText(payload.name) || fallbackName;
+    const name = cleanText(payload.name || claims.name) || fallbackName;
 
-    let user = this.data.users.find((candidate) => candidate.providerIDs?.apple === providerKey)
+    let user = this.data.users.find((candidate) => candidate.providerIDs?.[provider] === providerKey)
       || this.findUserByEmail(email);
 
     if (!user) {
@@ -357,13 +378,13 @@ class KinraAuthStore {
         phone: "",
         passwordHash: "",
         passwordSalt: "",
-        providerIDs: { apple: providerKey },
+        providerIDs: { [provider]: providerKey },
         createdAt: now,
         updatedAt: now
       };
       this.data.users.push(user);
     } else {
-      user.providerIDs = { ...(user.providerIDs || {}), apple: providerKey };
+      user.providerIDs = { ...(user.providerIDs || {}), [provider]: providerKey };
       if (!user.name && name) user.name = name;
       user.updatedAt = new Date().toISOString();
     }
@@ -652,6 +673,68 @@ async function appleJWKs() {
   return appleJWKCache.keys;
 }
 
+async function verifyGoogleIdentityToken(idToken) {
+  if (!isGoogleConfigured()) {
+    sendAuthError("Google sign-in is not configured yet.", 501, "provider_not_configured");
+  }
+
+  const token = String(idToken || "");
+  const parts = token.split(".");
+  if (parts.length !== 3) {
+    sendAuthError("Google sign-in token is missing.", 401, "invalid_google_token");
+  }
+
+  const [encodedHeader, encodedPayload, encodedSignature] = parts;
+  const header = JSON.parse(base64URLDecode(encodedHeader).toString("utf8"));
+  const claims = JSON.parse(base64URLDecode(encodedPayload).toString("utf8"));
+  const keys = await googleJWKs();
+  const jwk = keys.find((key) => key.kid === header.kid && key.kty === "RSA");
+  if (!jwk) {
+    sendAuthError("Google sign-in key was not found.", 401, "invalid_google_token");
+  }
+
+  const publicKey = createPublicKey({ key: jwk, format: "jwk" });
+  const isVerified = verifySignature(
+    "RSA-SHA256",
+    Buffer.from(`${encodedHeader}.${encodedPayload}`),
+    publicKey,
+    base64URLDecode(encodedSignature)
+  );
+  if (!isVerified) {
+    sendAuthError("Google sign-in token could not be verified.", 401, "invalid_google_token");
+  }
+
+  const validIssuer = claims.iss === "https://accounts.google.com" || claims.iss === "accounts.google.com";
+  if (!validIssuer || !config.googleClientIDs.includes(claims.aud)) {
+    sendAuthError("Google sign-in token is for a different app.", 401, "invalid_google_token");
+  }
+  if (!claims.sub || Number(claims.exp || 0) * 1000 <= Date.now()) {
+    sendAuthError("Google sign-in token has expired.", 401, "invalid_google_token");
+  }
+
+  return claims;
+}
+
+async function googleJWKs() {
+  const now = Date.now();
+  if (googleJWKCache.keys.length && googleJWKCache.expiresAt > now) {
+    return googleJWKCache.keys;
+  }
+
+  const response = await fetch("https://www.googleapis.com/oauth2/v3/certs", {
+    headers: { accept: "application/json" }
+  });
+  if (!response.ok) {
+    sendAuthError("Google sign-in keys are temporarily unavailable.", 503, "google_keys_unavailable");
+  }
+  const payload = await response.json();
+  googleJWKCache = {
+    keys: Array.isArray(payload.keys) ? payload.keys : [],
+    expiresAt: now + 6 * 60 * 60 * 1000
+  };
+  return googleJWKCache.keys;
+}
+
 authStore = new KinraAuthStore(config.authDataPath);
 
 function isAuthorized(request) {
@@ -676,6 +759,10 @@ function isPSAConfigured() {
     config.psaPassword
   );
   return Boolean(config.psaAPIBaseURL && config.psaCertPathTemplate && hasCredentialPath);
+}
+
+function isGoogleConfigured() {
+  return config.googleClientIDs.length > 0;
 }
 
 function isEbayConfigured() {
