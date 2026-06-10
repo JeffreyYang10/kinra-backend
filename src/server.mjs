@@ -180,6 +180,30 @@ export async function handleKinraRequest(request, response) {
       return;
     }
 
+    if (url.pathname === "/account/data" && request.method === "GET") {
+      const snapshot = await authStore.accountDataForBearerToken(authorizationBearerToken(request));
+      if (!snapshot) {
+        sendJSON(response, 401, { error: "unauthorized" });
+        return;
+      }
+      sendJSON(response, 200, snapshot);
+      return;
+    }
+
+    if (url.pathname === "/account/data" && request.method === "PUT") {
+      const payload = await readJSONBody(request);
+      const snapshot = await authStore.replaceAccountDataForBearerToken(
+        authorizationBearerToken(request),
+        normalizeAccountDataPayload(payload)
+      );
+      if (!snapshot) {
+        sendJSON(response, 401, { error: "unauthorized" });
+        return;
+      }
+      sendJSON(response, 200, snapshot);
+      return;
+    }
+
     if (url.pathname === "/market/quote" && (request.method === "POST" || request.method === "GET")) {
       if (!isMarketAuthorized(request)) {
         sendJSON(response, 401, { error: "unauthorized" });
@@ -320,6 +344,8 @@ class KinraAuthStore {
       passwordHash: passwordRecord.hash,
       passwordSalt: passwordRecord.salt,
       providerIDs: {},
+      accountData: {},
+      accountDataUpdatedAt: "",
       createdAt: now,
       updatedAt: now
     };
@@ -395,6 +421,8 @@ class KinraAuthStore {
         passwordHash: "",
         passwordSalt: "",
         providerIDs: { [provider]: providerKey },
+        accountData: {},
+        accountDataUpdatedAt: "",
         createdAt: now,
         updatedAt: now
       };
@@ -410,7 +438,7 @@ class KinraAuthStore {
     return accountResponse(user, sessionToken);
   }
 
-  async accountForBearerToken(token) {
+  async userForBearerToken(token) {
     await this.load();
     const rawToken = cleanText(token);
     if (!rawToken) {
@@ -426,8 +454,33 @@ class KinraAuthStore {
       return null;
     }
 
-    const user = this.data.users.find((candidate) => candidate.id === session.userID);
+    return this.data.users.find((candidate) => candidate.id === session.userID) || null;
+  }
+
+  async accountForBearerToken(token) {
+    const user = await this.userForBearerToken(token);
     return user ? accountResponse(user, "") : null;
+  }
+
+  async accountDataForBearerToken(token) {
+    const user = await this.userForBearerToken(token);
+    if (!user) {
+      return null;
+    }
+    return accountDataResponse(user);
+  }
+
+  async replaceAccountDataForBearerToken(token, accountData) {
+    const user = await this.userForBearerToken(token);
+    if (!user) {
+      return null;
+    }
+    const now = new Date().toISOString();
+    user.accountData = accountData;
+    user.accountDataUpdatedAt = now;
+    user.updatedAt = now;
+    await this.save();
+    return accountDataResponse(user);
   }
 
   async isUsernameAvailable(username) {
@@ -510,6 +563,29 @@ function accountResponse(user, sessionToken) {
     phone: user.phone,
     sessionToken
   };
+}
+
+function accountDataResponse(user) {
+  return {
+    data: isPlainObject(user.accountData) ? user.accountData : {},
+    updatedAt: user.accountDataUpdatedAt || null
+  };
+}
+
+function normalizeAccountDataPayload(payload = {}) {
+  const data = payload?.data;
+  if (!isPlainObject(data)) {
+    sendAuthError("Account data must be an object.", 400, "invalid_account_data");
+  }
+  const serialized = JSON.stringify(data);
+  if (Buffer.byteLength(serialized, "utf8") > 1_000_000) {
+    sendAuthError("Account data is too large.", 413, "account_data_too_large");
+  }
+  return data;
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function cleanText(value) {
