@@ -163,6 +163,31 @@ export async function handleKinraRequest(request, response) {
       return;
     }
 
+    if (url.pathname === "/auth/logout" && request.method === "POST") {
+      const didSignOut = await authStore.revokeBearerToken(authorizationBearerToken(request));
+      if (!didSignOut) {
+        sendJSON(response, 401, { error: "unauthorized" });
+        return;
+      }
+      sendJSON(response, 200, { ok: true });
+      return;
+    }
+
+    if (url.pathname === "/auth/change-password" && request.method === "POST") {
+      const payload = await readJSONBody(request);
+      const didChange = await authStore.changePasswordForBearerToken(
+        authorizationBearerToken(request),
+        String(payload.currentPassword || ""),
+        String(payload.newPassword || "")
+      );
+      if (!didChange) {
+        sendJSON(response, 401, { error: "unauthorized" });
+        return;
+      }
+      sendJSON(response, 200, { ok: true });
+      return;
+    }
+
     if (url.pathname === "/auth/federated" && request.method === "POST") {
       const payload = await readJSONBody(request);
       const account = await authStore.federatedSignIn(payload);
@@ -177,6 +202,16 @@ export async function handleKinraRequest(request, response) {
         return;
       }
       sendJSON(response, 200, session);
+      return;
+    }
+
+    if (url.pathname === "/auth/me" && request.method === "DELETE") {
+      const didDelete = await authStore.deleteAccountForBearerToken(authorizationBearerToken(request));
+      if (!didDelete) {
+        sendJSON(response, 401, { error: "unauthorized" });
+        return;
+      }
+      sendJSON(response, 200, { ok: true });
       return;
     }
 
@@ -378,6 +413,58 @@ class KinraAuthStore {
     const sessionToken = this.createSession(user.id);
     await this.save();
     return accountResponse(user, sessionToken);
+  }
+
+  async revokeBearerToken(token) {
+    await this.load();
+    const rawToken = cleanText(token);
+    if (!rawToken) {
+      return false;
+    }
+
+    const tokenHash = sha256(rawToken);
+    const beforeCount = this.data.sessions.length;
+    this.data.sessions = this.data.sessions.filter((session) => session.tokenHash !== tokenHash);
+    if (this.data.sessions.length === beforeCount) {
+      return false;
+    }
+    await this.save();
+    return true;
+  }
+
+  async changePasswordForBearerToken(token, currentPassword, newPassword) {
+    const user = await this.userForBearerToken(token);
+    if (!user) {
+      return false;
+    }
+    if (!user.passwordHash || !user.passwordSalt) {
+      sendAuthError("This account uses Apple or Google sign in.", 400, "password_not_available");
+    }
+    if (!currentPassword) {
+      sendAuthError("Enter your current password.", 400, "missing_current_password");
+    }
+    const isValid = await verifyPassword(currentPassword, user.passwordSalt, user.passwordHash);
+    if (!isValid) {
+      sendAuthError("Current password is incorrect.", 401, "invalid_credentials");
+    }
+    validatePassword(newPassword);
+    const passwordRecord = await hashPassword(newPassword);
+    user.passwordHash = passwordRecord.hash;
+    user.passwordSalt = passwordRecord.salt;
+    user.updatedAt = new Date().toISOString();
+    await this.save();
+    return true;
+  }
+
+  async deleteAccountForBearerToken(token) {
+    const user = await this.userForBearerToken(token);
+    if (!user) {
+      return false;
+    }
+    this.data.users = this.data.users.filter((candidate) => candidate.id !== user.id);
+    this.data.sessions = this.data.sessions.filter((session) => session.userID !== user.id);
+    await this.save();
+    return true;
   }
 
   async federatedSignIn(payload = {}) {
