@@ -1342,7 +1342,7 @@ async function pokemonTCGPricingProvider(request) {
   const upstreamResponse = await fetch(url, {
     headers: {
       accept: "application/json",
-      "user-agent": "Saku/0.1 market-data"
+      "user-agent": "Kinra/0.1 market-data"
     }
   });
 
@@ -1373,7 +1373,7 @@ async function yugiohPublicPricingProvider(request) {
   const upstreamResponse = await fetch(url, {
     headers: {
       accept: "application/json",
-      "user-agent": "Saku/0.1 market-data"
+      "user-agent": "Kinra/0.1 market-data"
     }
   });
 
@@ -1413,7 +1413,7 @@ async function scryfallPricingProvider(request) {
   const upstreamResponse = await fetch(url, {
     headers: {
       accept: "application/json",
-      "user-agent": "Saku/0.1 market-data"
+      "user-agent": "Kinra/0.1 market-data"
     }
   });
 
