@@ -1,4 +1,5 @@
 import http from "node:http";
+import { resolve4, resolve6, resolveMx } from "node:dns/promises";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
@@ -78,6 +79,7 @@ let tcgplayerTokenCache = {
 };
 
 const gradedCensusCache = new Map();
+const emailDomainCache = new Map();
 const gradedCensusCacheTTL = 6 * 60 * 60 * 1000;
 const marketQuoteCache = new Map();
 const marketQuoteCacheTTL = 30 * 60 * 1000;
@@ -119,6 +121,19 @@ export async function handleKinraRequest(request, response) {
           tcgplayer: isTCGPlayerConfigured(),
           gradedCensus: isGradedCensusConfigured()
         }
+      });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/auth/email-domain") {
+      const email = normalizedEmail(url.searchParams.get("email") || "");
+      const formatReason = emailValidationReason(email);
+      const domain = emailDomainFrom(email);
+      const recognized = formatReason === "valid" && await isEmailDomainRecognized(domain);
+      sendJSON(response, 200, {
+        recognized,
+        domain,
+        reason: formatReason !== "valid" ? formatReason : recognized ? "recognized" : "unrecognized_domain"
       });
       return;
     }
@@ -281,6 +296,7 @@ class KinraAuthStore {
     validateName(name);
     validateUsernameOrThrow(username);
     validateEmail(email);
+    await validateEmailDomainOrThrow(email);
     validatePhone(phone);
     validatePassword(password);
 
@@ -552,9 +568,93 @@ function validateName(name) {
 }
 
 function validateEmail(email) {
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+  if (emailValidationReason(email) !== "valid") {
     sendAuthError("Enter a valid email.", 400, "invalid_email");
   }
+}
+
+function emailValidationReason(email) {
+  const value = normalizedEmail(email);
+  if (!value || value.length > 254) return "invalid_email";
+  if (/\s/.test(value)) return "invalid_email";
+  if ((value.match(/@/g) || []).length !== 1) return "invalid_email";
+
+  const [local, domain] = value.split("@");
+  if (!local || local.length > 64 || local.startsWith(".") || local.endsWith(".") || local.includes("..")) {
+    return "invalid_email";
+  }
+  if (!/^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+$/.test(local)) {
+    return "invalid_email";
+  }
+
+  const labels = domain.split(".");
+  if (labels.length < 2 || labels.some((label) => !label || label.length > 63)) {
+    return "invalid_domain";
+  }
+  if (labels.some((label) => label.startsWith("-") || label.endsWith("-") || !/^[A-Za-z0-9-]+$/.test(label))) {
+    return "invalid_domain";
+  }
+  const tld = labels.at(-1) || "";
+  if (tld.length < 2 || !/^[A-Za-z]+$/.test(tld)) {
+    return "invalid_domain";
+  }
+  return "valid";
+}
+
+function emailDomainFrom(email) {
+  const parts = normalizedEmail(email).split("@");
+  return parts.length === 2 ? parts[1] : "";
+}
+
+async function validateEmailDomainOrThrow(email) {
+  const domain = emailDomainFrom(email);
+  if (!await isEmailDomainRecognized(domain)) {
+    sendAuthError("Kinra does not recognize this email domain.", 400, "unrecognized_email_domain");
+  }
+}
+
+async function isEmailDomainRecognized(domain) {
+  const normalized = String(domain || "").trim().toLowerCase();
+  if (!normalized) return false;
+
+  const cached = emailDomainCache.get(normalized);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.recognized;
+  }
+
+  const recognized = await hasEmailDNSRecord(normalized);
+  emailDomainCache.set(normalized, {
+    recognized,
+    expiresAt: Date.now() + 12 * 60 * 60 * 1000
+  });
+  return recognized;
+}
+
+async function hasEmailDNSRecord(domain) {
+  try {
+    const mxRecords = await withTimeout(resolveMx(domain), 2500);
+    if (Array.isArray(mxRecords) && mxRecords.length > 0) {
+      return true;
+    }
+  } catch {
+    // Continue to address-record fallback.
+  }
+
+  try {
+    const records = await withTimeout(Promise.any([resolve4(domain), resolve6(domain)]), 2500);
+    return Array.isArray(records) && records.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+function withTimeout(promise, timeoutMs) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      setTimeout(() => reject(new Error("dns_timeout")), timeoutMs);
+    })
+  ]);
 }
 
 function validatePhone(phone) {
