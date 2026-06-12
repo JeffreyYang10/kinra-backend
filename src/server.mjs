@@ -275,6 +275,34 @@ export async function handleKinraRequest(request, response) {
       return;
     }
 
+    if (url.pathname === "/catalog/image" && (request.method === "POST" || request.method === "GET")) {
+      if (!isMarketAuthorized(request)) {
+        sendJSON(response, 401, { error: "unauthorized" });
+        return;
+      }
+
+      const imageRequest = request.method === "POST"
+        ? normalizeMarketQuoteRequest(await readJSONBody(request))
+        : normalizeMarketQuoteRequest(Object.fromEntries(url.searchParams.entries()));
+
+      if (!imageRequest.name) {
+        sendJSON(response, 400, { error: "missing_card_name" });
+        return;
+      }
+
+      const image = await resolvePriceChartingCatalogImage(imageRequest);
+      if (!image) {
+        sendJSON(response, 404, {
+          error: "image_unavailable",
+          message: "PriceCharting did not return a usable image for this catalog item."
+        });
+        return;
+      }
+
+      sendJSON(response, 200, image);
+      return;
+    }
+
     const tcgplayerPricingPath = matchedTCGPlayerPricingPath(url.pathname);
     if (request.method === "GET" && tcgplayerPricingPath) {
       if (!isMarketAuthorized(request)) {
@@ -1399,6 +1427,43 @@ async function priceChartingPricingProvider(request) {
   };
 }
 
+async function resolvePriceChartingCatalogImage(request) {
+  if (!isPriceChartingConfigured() || !request.name) {
+    return null;
+  }
+
+  const product = await lookupPriceChartingProduct(request);
+  if (!product) {
+    return null;
+  }
+
+  const productId = product.id || product["id"] || "";
+  const productName = product["product-name"] || product.productName || product.name || request.name;
+  const productImageURL = priceChartingImageURLFromRecord(product);
+  if (productImageURL) {
+    return {
+      imageURL: productImageURL,
+      sourceName: "PriceCharting",
+      sourceDetail: "Product image",
+      productId,
+      productName
+    };
+  }
+
+  const offerImageURL = await lookupPriceChartingOfferImage(product);
+  if (offerImageURL) {
+    return {
+      imageURL: offerImageURL,
+      sourceName: "PriceCharting",
+      sourceDetail: "Marketplace offer image",
+      productId,
+      productName
+    };
+  }
+
+  return null;
+}
+
 async function lookupPriceChartingProduct(request) {
   const queries = priceChartingQueries(request);
   for (const query of queries) {
@@ -1422,6 +1487,71 @@ async function lookupPriceChartingProduct(request) {
   }
 
   return null;
+}
+
+async function lookupPriceChartingOfferImage(product) {
+  const productId = product.id || product["id"];
+  if (!productId) {
+    return null;
+  }
+
+  for (const status of ["available", "sold", "ended"]) {
+    const payload = await fetchPriceCharting("/api/offers", { id: productId, status });
+    const offer = priceChartingOffers(payload).find((candidate) => priceChartingImageURLFromRecord(candidate));
+    const imageURL = priceChartingImageURLFromRecord(offer);
+    if (imageURL) {
+      return imageURL;
+    }
+  }
+
+  return null;
+}
+
+function priceChartingOffers(payload) {
+  if (!payload) {
+    return [];
+  }
+  if (Array.isArray(payload.offers)) {
+    return payload.offers;
+  }
+  if (Array.isArray(payload.data)) {
+    return payload.data;
+  }
+  if (Array.isArray(payload)) {
+    return payload;
+  }
+  return [];
+}
+
+function priceChartingImageURLFromRecord(record) {
+  const rawURL = firstString(record || {}, [
+    "image-url",
+    "image_url",
+    "imageURL",
+    "imageUrl",
+    "image",
+    "thumbnail",
+    "thumbnail-url",
+    "thumbnail_url"
+  ]);
+  const imageURL = normalizedPriceChartingImageURL(rawURL);
+  return imageURL && isImageURL(imageURL) ? imageURL : null;
+}
+
+function normalizedPriceChartingImageURL(value) {
+  const trimmed = String(value || "").trim();
+  if (!trimmed) {
+    return null;
+  }
+  try {
+    return new URL(trimmed).toString();
+  } catch {
+    try {
+      return new URL(trimmed, ensureTrailingSlash(config.priceChartingAPIBaseURL)).toString();
+    } catch {
+      return null;
+    }
+  }
 }
 
 function priceChartingQueries(request) {
