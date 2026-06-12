@@ -209,7 +209,7 @@ If no configured provider returns usable pricing, the backend returns `404 marke
 - eBay active supply uses the Buy Browse API `item_summary/search`.
 - eBay sold comps require Marketplace Insights access, which is limited access. Leave `EBAY_ENABLE_MARKETPLACE_INSIGHTS=false` unless your eBay app is approved.
 - TCGplayer pricing requires existing developer API access.
-- PriceCharting contributes current ungraded and graded card values. Kinra caches PriceCharting responses server-side and uses stored market snapshots for charts, because PriceCharting returns current prices rather than historical price series.
+- PriceCharting contributes current ungraded and graded card values. Kinra caches PriceCharting responses server-side; chart rendering should read from Kinra's stored market snapshots because PriceCharting returns current prices rather than historical price series.
 - PSA population reports use RapidAPI's Graded Card Census API.
 
 ## TCGplayer Pricing Proxy Routes
