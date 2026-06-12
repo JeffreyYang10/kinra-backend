@@ -54,6 +54,10 @@ services:
         sync: false
       - key: TCGPLAYER_ACCESS_TOKEN
         sync: false
+      - key: PRICECHARTING_API_TOKEN
+        sync: false
+      - key: PRICECHARTING_API_BASE_URL
+        value: https://www.pricecharting.com
       - key: GRADED_CENSUS_RAPIDAPI_KEY
         sync: false
       - key: GRADED_CENSUS_RAPIDAPI_HOST

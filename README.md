@@ -79,6 +79,9 @@ TCGPLAYER_PUBLIC_KEY=
 TCGPLAYER_PRIVATE_KEY=
 TCGPLAYER_PRICING_BASE_URL=https://api.tcgplayer.com/pricing
 
+PRICECHARTING_API_TOKEN=
+PRICECHARTING_API_BASE_URL=https://www.pricecharting.com
+
 GRADED_CENSUS_RAPIDAPI_KEY=
 GRADED_CENSUS_RAPIDAPI_HOST=graded-card-census-api.p.rapidapi.com
 GRADED_CENSUS_API_BASE_URL=https://graded-card-census-api.p.rapidapi.com
@@ -206,6 +209,7 @@ If no configured provider returns usable pricing, the backend returns `404 marke
 - eBay active supply uses the Buy Browse API `item_summary/search`.
 - eBay sold comps require Marketplace Insights access, which is limited access. Leave `EBAY_ENABLE_MARKETPLACE_INSIGHTS=false` unless your eBay app is approved.
 - TCGplayer pricing requires existing developer API access.
+- PriceCharting contributes current ungraded and graded card values. Kinra caches PriceCharting responses server-side and uses stored market snapshots for charts, because PriceCharting returns current prices rather than historical price series.
 - PSA population reports use RapidAPI's Graded Card Census API.
 
 ## TCGplayer Pricing Proxy Routes

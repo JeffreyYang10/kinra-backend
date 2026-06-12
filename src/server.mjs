@@ -53,6 +53,8 @@ const config = {
   tcgplayerAPIBaseURL: process.env.TCGPLAYER_API_BASE_URL || "https://api.tcgplayer.com/v1.39.0",
   tcgplayerPricingBaseURL: process.env.TCGPLAYER_PRICING_BASE_URL || "https://api.tcgplayer.com/pricing",
   tcgplayerTokenURL: process.env.TCGPLAYER_TOKEN_URL || "https://api.tcgplayer.com/token",
+  priceChartingAPIToken: process.env.PRICECHARTING_API_TOKEN || "",
+  priceChartingAPIBaseURL: process.env.PRICECHARTING_API_BASE_URL || "https://www.pricecharting.com",
   gradedCensusRapidAPIKey: process.env.GRADED_CENSUS_RAPIDAPI_KEY || "",
   gradedCensusRapidAPIHost: process.env.GRADED_CENSUS_RAPIDAPI_HOST || "graded-card-census-api.p.rapidapi.com",
   gradedCensusAPIBaseURL: process.env.GRADED_CENSUS_API_BASE_URL || "https://graded-card-census-api.p.rapidapi.com",
@@ -83,6 +85,10 @@ const emailDomainCache = new Map();
 const gradedCensusCacheTTL = 6 * 60 * 60 * 1000;
 const marketQuoteCache = new Map();
 const marketQuoteCacheTTL = 30 * 60 * 1000;
+const priceChartingCache = new Map();
+const priceChartingCacheTTL = 24 * 60 * 60 * 1000;
+const priceChartingMinimumIntervalMS = 1100;
+let priceChartingNextRequestAt = 0;
 let authStore;
 let appleJWKCache = {
   keys: [],
@@ -119,6 +125,7 @@ export async function handleKinraRequest(request, response) {
           ebayBrowse: isEbayConfigured(),
           ebayMarketplaceInsights: isEbayInsightsConfigured(),
           tcgplayer: isTCGPlayerConfigured(),
+          priceCharting: isPriceChartingConfigured(),
           gradedCensus: isGradedCensusConfigured()
         }
       });
@@ -1040,12 +1047,20 @@ function isTCGPlayerConfigured() {
   return Boolean(config.tcgplayerAccessToken || (config.tcgplayerPublicKey && config.tcgplayerPrivateKey));
 }
 
+function isPriceChartingConfigured() {
+  return Boolean(config.priceChartingAPIToken && config.priceChartingAPIBaseURL);
+}
+
 function isGradedCensusConfigured() {
   return Boolean(config.gradedCensusRapidAPIKey && config.gradedCensusRapidAPIHost && config.gradedCensusAPIBaseURL);
 }
 
 function isMarketConfigured() {
-  return isPSAConfigured() || isEbayConfigured() || isTCGPlayerConfigured() || isGradedCensusConfigured();
+  return isPSAConfigured()
+    || isEbayConfigured()
+    || isTCGPlayerConfigured()
+    || isPriceChartingConfigured()
+    || isGradedCensusConfigured();
 }
 
 function normalizeCertNumber(value) {
@@ -1102,6 +1117,7 @@ async function buildMarketQuote(request) {
 
   const includeCardOnlyProviders = isIndividualCardRequest(request);
   const tasks = [
+    priceChartingPricingProvider(request),
     publicAvailablePricingProvider(request),
     ebayActiveListingsProvider(request),
     ebaySoldCompsProvider(request),
@@ -1342,6 +1358,237 @@ async function tcgplayerPricingProvider(request) {
     }],
     pricingRows
   };
+}
+
+async function priceChartingPricingProvider(request) {
+  if (!isPriceChartingConfigured() || !request.name) {
+    return null;
+  }
+
+  const product = await lookupPriceChartingProduct(request);
+  if (!product) {
+    return null;
+  }
+
+  const pricingRows = priceChartingPricingRows(product);
+  if (!pricingRows.length) {
+    return null;
+  }
+
+  const selectedRows = preferredPricingRows(pricingRows, request);
+  const sourceRows = selectedRows.length ? selectedRows : pricingRows;
+  const sourceValue = median(sourceRows.map(pricingRowValue).filter((price) => price > 0));
+  if (!sourceValue) {
+    return null;
+  }
+
+  return {
+    sources: [{
+      name: "PriceCharting",
+      basis: priceChartingSourceBasis(product, sourceRows),
+      valueUSD: roundCurrency(sourceValue),
+      observedAt: new Date().toISOString()
+    }],
+    pricingRows
+  };
+}
+
+async function lookupPriceChartingProduct(request) {
+  const queries = priceChartingQueries(request);
+  for (const query of queries) {
+    const directProduct = await fetchPriceCharting("/api/product", { q: query });
+    if (directProduct && priceChartingProductScore(request, directProduct) > 0) {
+      return directProduct;
+    }
+
+    const searchPayload = await fetchPriceCharting("/api/products", { q: query });
+    const products = priceChartingProducts(searchPayload);
+    const bestProduct = bestPriceChartingProduct(request, products);
+    if (bestProduct?.id || bestProduct?.["id"]) {
+      const detailedProduct = await fetchPriceCharting("/api/product", { id: bestProduct.id || bestProduct["id"] });
+      if (detailedProduct && priceChartingProductScore(request, detailedProduct) > 0) {
+        return detailedProduct;
+      }
+    }
+    if (bestProduct && priceChartingProductScore(request, bestProduct) > 0) {
+      return bestProduct;
+    }
+  }
+
+  return null;
+}
+
+function priceChartingQueries(request) {
+  const printedNumber = normalizedCardNumber(request.number);
+  const numberToken = printedNumber ? `#${printedNumber}` : "";
+  const gameToken = normalizedSearchText(request.game).includes("pokemon") ? "Pokemon" : request.game;
+  const baseParts = [
+    [request.name, request.setName, numberToken, gameToken],
+    [request.name, request.setName, request.itemKind, gameToken],
+    [request.name, numberToken, gameToken],
+    [request.name, request.setName],
+    [request.name]
+  ];
+
+  return [...new Set(baseParts
+    .map((parts) => parts.filter(Boolean).join(" ").replace(/\s+/g, " ").trim())
+    .filter(Boolean))];
+}
+
+async function fetchPriceCharting(pathname, params = {}) {
+  const cacheKey = `${pathname}?${new URLSearchParams(Object.entries(params).sort()).toString()}`;
+  const cached = priceChartingCache.get(cacheKey);
+  if (cached && Date.now() - cached.storedAt < priceChartingCacheTTL) {
+    return cached.payload;
+  }
+
+  await waitForPriceChartingSlot();
+
+  const url = new URL(pathname, ensureTrailingSlash(config.priceChartingAPIBaseURL));
+  url.searchParams.set("t", config.priceChartingAPIToken);
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null && String(value).trim()) {
+      url.searchParams.set(key, String(value).trim());
+    }
+  }
+
+  const upstreamResponse = await fetch(url, {
+    headers: {
+      accept: "application/json",
+      "user-agent": "Kinra/0.1 market-data"
+    }
+  });
+
+  if (!upstreamResponse.ok) {
+    return null;
+  }
+
+  const payload = parseMaybeJSON(await upstreamResponse.text());
+  if (!payload || payload.status === "error" || payload.error) {
+    return null;
+  }
+
+  priceChartingCache.set(cacheKey, { payload, storedAt: Date.now() });
+  return payload;
+}
+
+async function waitForPriceChartingSlot() {
+  const now = Date.now();
+  const scheduledAt = Math.max(now, priceChartingNextRequestAt);
+  priceChartingNextRequestAt = scheduledAt + priceChartingMinimumIntervalMS;
+  const delay = scheduledAt - now;
+  if (delay > 0) {
+    await new Promise((resolve) => setTimeout(resolve, delay));
+  }
+}
+
+function priceChartingProducts(payload) {
+  if (!payload) {
+    return [];
+  }
+  if (Array.isArray(payload.products)) {
+    return payload.products;
+  }
+  if (Array.isArray(payload.data)) {
+    return payload.data;
+  }
+  if (Array.isArray(payload)) {
+    return payload;
+  }
+  return [];
+}
+
+function bestPriceChartingProduct(request, products) {
+  if (!Array.isArray(products) || !products.length) {
+    return null;
+  }
+
+  const scored = products
+    .map((product) => ({ product, score: priceChartingProductScore(request, product) }))
+    .sort((left, right) => right.score - left.score);
+
+  return scored[0]?.score > 0 ? scored[0].product : null;
+}
+
+function priceChartingProductScore(request, product) {
+  if (!product || product.status === "error") {
+    return 0;
+  }
+
+  const productName = product["product-name"] || product.productName || product.name || "";
+  const consoleName = product["console-name"] || product.consoleName || product.console || "";
+  const haystack = normalizedSearchText([productName, consoleName, product.genre].filter(Boolean).join(" "));
+  const nameTokens = importantTokens(request.name);
+  const setTokens = importantTokens(request.setName);
+  const kindTokens = importantTokens(request.itemKind);
+  const requestNumber = normalizedCardNumber(request.number);
+  let score = 0;
+
+  if (nameTokens.length && nameTokens.every((token) => haystack.includes(token))) score += 60;
+  if (setTokens.length && setTokens.some((token) => haystack.includes(token))) score += 30;
+  if (kindTokens.length && kindTokens.some((token) => haystack.includes(token))) score += 12;
+  if (requestNumber && priceChartingProductHasNumber(product, requestNumber)) score += 55;
+  if (normalizedSearchText(request.game).includes("pokemon")) {
+    score += haystack.includes("pokemon") ? 10 : -30;
+  }
+  if (isSealedMarketRequest(request) && ["box", "pack", "bundle", "tin", "trainer"].some((token) => haystack.includes(token))) {
+    score += 15;
+  }
+
+  return score;
+}
+
+function priceChartingProductHasNumber(product, requestNumber) {
+  const productName = product["product-name"] || product.productName || product.name || "";
+  const haystack = normalizedSearchText(productName);
+  const compactHaystack = productName.toLowerCase().replace(/[^a-z0-9#]+/g, " ");
+  return haystack.split(" ").includes(requestNumber)
+    || compactHaystack.includes(`#${requestNumber}`)
+    || compactHaystack.includes(` ${requestNumber} `);
+}
+
+function priceChartingPricingRows(product) {
+  return [
+    priceChartingPriceRow("Ungraded", product["loose-price"]),
+    priceChartingPriceRow("PSA 7", product["cib-price"]),
+    priceChartingPriceRow("PSA 8", product["new-price"]),
+    priceChartingPriceRow("PSA 9", product["graded-price"]),
+    priceChartingPriceRow("PSA 10", product["manual-only-price"]),
+    priceChartingPriceRow("BGS 10", product["bgs-10-price"]),
+    priceChartingPriceRow("CGC 10", product["condition-17-price"]),
+    priceChartingPriceRow("SGC 10", product["condition-18-price"])
+  ].filter(Boolean);
+}
+
+function priceChartingPriceRow(label, cents) {
+  const value = centsToDollars(cents);
+  if (!value) {
+    return null;
+  }
+
+  return {
+    label,
+    low: value,
+    market: value,
+    high: value,
+    comps: 0,
+    confidence: "Medium",
+    liquidity: "Medium"
+  };
+}
+
+function centsToDollars(value) {
+  const cents = Number(value);
+  if (!Number.isFinite(cents) || cents <= 0) {
+    return null;
+  }
+  return roundCurrency(cents / 100);
+}
+
+function priceChartingSourceBasis(product, rows) {
+  const labels = rows.map((row) => row.label).filter(Boolean).join(", ");
+  const productName = product["product-name"] || product.productName || product.name || "matched product";
+  return `${labels || "Market"} price for ${productName}`;
 }
 
 function matchedTCGPlayerPricingPath(pathname) {
@@ -2117,6 +2364,7 @@ function conditionPricingRows(pricingRows) {
       || label.includes("played")
       || label.includes("near mint")
       || label.includes("mint")
+      || label.includes("ungraded")
       || label.includes("psa")
       || label.includes("bgs")
       || label.includes("cgc")
@@ -2208,11 +2456,27 @@ function pricingRowScore(row, request) {
   if (label.includes("heavily played") || label === "hp") score += preference.includes("heavily played") || preference.includes("hp") ? 35 : 0;
   if (label.includes("damaged") || label === "dmg") score += preference.includes("damaged") || preference.includes("dmg") ? 35 : 0;
 
+  const requestedGrade = numericGradeFromText(preference);
+  const rowGrade = numericGradeFromText(row.label);
+  if (requestedGrade && rowGrade) {
+    score += requestedGrade === rowGrade ? 45 : -30;
+  }
+
   if (label.includes("reverse")) score += preference.includes("reverse") ? 80 : -15;
   if (label.includes("holo")) score += preference.includes("holo") || preference.includes("foil") || premiumPokemonRarity(preference) ? 70 : 10;
   if (label.includes("normal")) score += preference.includes("normal") ? 45 : premiumPokemonRarity(preference) ? -25 : 12;
   if (label.includes("1st") || label.includes("first")) score += preference.includes("first") ? 45 : -20;
-  if (label.includes("psa")) score += preference.includes("psa") ? 80 : -40;
+  const labelGraders = ["psa", "bgs", "cgc", "sgc"].filter((token) => label.includes(token));
+  const preferenceGraders = ["psa", "bgs", "cgc", "sgc"].filter((token) => preference.includes(token));
+  if (labelGraders.length) {
+    score += labelGraders.some((token) => preferenceGraders.includes(token))
+      ? 80
+      : preferenceGraders.length
+        ? -50
+        : -40;
+  } else if (label.includes("graded")) {
+    score += preference.includes("graded") ? 60 : -35;
+  }
 
   return score;
 }
