@@ -1149,8 +1149,14 @@ async function buildMarketQuote(request) {
   const activePrices = activeListings.map((listing) => listing.price).filter((price) => Number.isFinite(price) && price > 0);
   const selectedPricingRows = preferredPricingRows(pricingRows, request);
   const selectedPricingValues = selectedPricingRows.map(pricingRowValue).filter((price) => Number.isFinite(price) && price > 0);
+  const selectedPriceChartingValues = selectedPricingRows
+    .filter(isPriceChartingPricingRow)
+    .map(pricingRowValue)
+    .filter((price) => Number.isFinite(price) && price > 0);
   const sourcePrices = sources.map((source) => source.valueUSD).filter((price) => Number.isFinite(price) && price > 0);
-  const quotePrices = includedComps.length
+  const quotePrices = selectedPriceChartingValues.length
+    ? selectedPriceChartingValues
+    : includedComps.length
     ? includedComps.map((comp) => comp.price)
     : selectedPricingValues.length
       ? selectedPricingValues
@@ -1573,7 +1579,8 @@ function priceChartingPriceRow(label, cents) {
     high: value,
     comps: 0,
     confidence: "Medium",
-    liquidity: "Medium"
+    liquidity: "Medium",
+    source: "PriceCharting"
   };
 }
 
@@ -1644,7 +1651,8 @@ function tcgplayerPricingRows(payload) {
         high: roundCurrency(Number.isFinite(high) ? high : market),
         comps: 0,
         confidence: "Medium",
-        liquidity: "Medium"
+        liquidity: "Medium",
+        source: "TCGplayer"
       };
     })
     .filter(Boolean);
@@ -2450,11 +2458,14 @@ function pricingRowScore(row, request) {
   ].filter(Boolean).join(" "));
   let score = 0;
 
+  if (isPriceChartingPricingRow(row)) score += 120;
+
   if (label.includes("near mint") || label === "nm") score += preference.includes("near mint") || preference.includes("nm") ? 40 : 0;
   if (label.includes("lightly played") || label === "lp") score += preference.includes("lightly played") || preference.includes("lp") ? 35 : 0;
   if (label.includes("moderately played") || label === "mp") score += preference.includes("moderately played") || preference.includes("mp") ? 35 : 0;
   if (label.includes("heavily played") || label === "hp") score += preference.includes("heavily played") || preference.includes("hp") ? 35 : 0;
   if (label.includes("damaged") || label === "dmg") score += preference.includes("damaged") || preference.includes("dmg") ? 35 : 0;
+  if (label.includes("ungraded")) score += ["psa", "bgs", "cgc", "sgc", "graded"].some((token) => preference.includes(token)) ? -35 : 38;
 
   const requestedGrade = numericGradeFromText(preference);
   const rowGrade = numericGradeFromText(row.label);
@@ -2479,6 +2490,10 @@ function pricingRowScore(row, request) {
   }
 
   return score;
+}
+
+function isPriceChartingPricingRow(row) {
+  return normalizedSearchText(row?.source || "").includes("pricecharting");
 }
 
 function premiumPokemonRarity(preference) {
